@@ -238,6 +238,7 @@ const world = {
   player: null,
   time: 0,
   running: false,
+  paused: false,
 
   addFood(x, y, value, hue, drifting, ck = null) {
     this.food.push({
@@ -524,7 +525,7 @@ function setStickTarget() {
 }
 
 canvas.addEventListener('pointerdown', e => {
-  if (!world.running) return;
+  if (!world.running || world.paused) return;
   try { canvas.setPointerCapture?.(e.pointerId); } catch (err) {}
 
   if (e.pointerType === 'mouse') { boostFromMouse = true; return; }
@@ -543,7 +544,7 @@ canvas.addEventListener('pointerdown', e => {
 }, { passive: true });
 
 canvas.addEventListener('pointermove', e => {
-  if (!world.running) return;
+  if (!world.running || world.paused) return;
   if (e.pointerType === 'mouse') {
     if (!world.player) return;
     world.player.targetAngle = Math.atan2(e.clientY - H / 2, e.clientX - W / 2);
@@ -572,8 +573,12 @@ canvas.addEventListener('pointerup', endPointer, { passive: true });
 canvas.addEventListener('pointercancel', endPointer, { passive: true });
 
 addEventListener('keydown', e => {
-  if (e.code === 'Space') { boostFromKey = true; e.preventDefault(); }
+  if (e.code === 'Space' && !world.paused) { boostFromKey = true; e.preventDefault(); }
   if (e.code === 'Enter' && !world.running) startGame();
+  if (e.code === 'Escape' || e.code === 'KeyP') {
+    e.preventDefault();
+    if (world.paused) resumeGame(); else pauseGame();
+  }
 });
 addEventListener('keyup', e => { if (e.code === 'Space') boostFromKey = false; });
 addEventListener('contextmenu', e => e.preventDefault());
@@ -888,13 +893,19 @@ function startGame() {
   stick.active = false; stick.sprinting = false;
   boostFromSecondFinger = boostFromKey = boostFromMouse = false;
   lastTapEnd = 0;
+  world.paused = false;
+  pauseOverlay.classList.add('hidden');
   overlay.classList.add('hidden');
   hud.classList.remove('hidden');
+  pauseBtn.classList.remove('hidden');
   last = performance.now();
 }
 
 function endGame() {
   world.running = false;
+  world.paused = false;
+  pauseOverlay.classList.add('hidden');
+  pauseBtn.classList.add('hidden');
   const p = world.player;
   const len = Math.floor(p.len);
   const best = Math.max(len, +(localStorage.getItem('coil.best') || 0));
@@ -914,6 +925,55 @@ function endGame() {
   }, 700);
 }
 
+/* ------------------------------------------------------------------ *
+ * Pause
+ * ------------------------------------------------------------------ */
+const pauseBtn = document.getElementById('pauseBtn');
+const pauseOverlay = document.getElementById('pauseOverlay');
+
+function pauseGame() {
+  if (!world.running || world.paused) return;
+  world.paused = true;
+
+  // drop every held input, so a finger still down when you paused cannot
+  // resume you mid-sprint or mid-turn
+  stick.active = false; stick.id = null; stick.sprinting = false;
+  lastTapEnd = 0;
+  boostFromSecondFinger = boostFromKey = boostFromMouse = false;
+  const p = world.player;
+  if (p) p.boosting = false;
+
+  const ranked = world.snakes.filter(s => s.alive).sort((a, b) => b.len - a.len);
+  const idx = ranked.indexOf(p);
+  document.getElementById('pauseLen').textContent = Math.floor(p.len);
+  document.getElementById('pauseRank').textContent = idx >= 0 ? `${idx + 1}/${ranked.length}` : '–';
+  document.getElementById('pauseKills').textContent = p.kills;
+
+  pauseOverlay.classList.remove('hidden');
+  pauseBtn.classList.add('hidden');
+  hud.classList.add('hidden');
+}
+
+function resumeGame() {
+  if (!world.paused) return;
+  world.paused = false;
+  pauseOverlay.classList.add('hidden');
+  pauseBtn.classList.remove('hidden');
+  hud.classList.remove('hidden');
+  last = performance.now();          // don't hand the world one huge frame
+}
+
+pauseBtn.addEventListener('click', pauseGame);
+document.getElementById('resumeBtn').addEventListener('click', resumeGame);
+document.getElementById('quitBtn').addEventListener('click', () => {
+  world.paused = false;
+  pauseOverlay.classList.add('hidden');
+  last = performance.now();
+  // ending a run feeds the rivals, same as dying
+  if (world.player && world.player.alive) world.kill(world.player, null);
+  else endGame();
+});
+
 playBtn.addEventListener('click', startGame);
 
 /* ------------------------------------------------------------------ *
@@ -925,13 +985,21 @@ function frame(now) {
   const dt = Math.min(0.034, (now - last) / 1000);
   last = now;
   if (world.player) {
-    step(dt);                      // keeps running behind the menu as an attract loop
-    if (world.running) updateHud(dt);
-    draw();
+    if (!world.paused) {
+      step(dt);                    // keeps running behind the menu as an attract loop
+      if (world.running) updateHud(dt);
+    }
+    draw();                        // still redraw, so a resize while paused is handled
   }
 }
 
-document.addEventListener('visibilitychange', () => { last = performance.now(); });
+/* Switching apps, locking the phone or taking a call pauses the run rather
+ * than leaving you steering blind into someone's tail. */
+document.addEventListener('visibilitychange', () => {
+  last = performance.now();
+  if (document.hidden) pauseGame();
+});
+addEventListener('blur', () => { if (world.running) pauseGame(); });
 
 /* ------------------------------------------------------------------ *
  * Install prompt

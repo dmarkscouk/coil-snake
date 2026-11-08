@@ -13,6 +13,7 @@ completely offline. Vanilla JS + Canvas 2D, no build step, no dependencies.
 - If a rival runs into *your* tail, they die.
 - Any dead snake bursts into food — the longer it was, the bigger the feast.
 - **The world has no edge.** It runs on forever in every direction, and the further you stray the more rivals you meet (13 near the start, up to 24).
+- **Pause** with the button at the top of the screen, or Escape / P on desktop. The run also pauses itself if you switch apps, lock the phone or take a call, so backgrounding the game can't get you killed.
 - **Double-tap and hold** to sprint: tap once, then press and hold. You keep steering while you burn. A second finger held down works too. Sprinting costs length and leaves a trail of food behind you.
 
 On desktop the snake follows the mouse and click-or-space sprints.
