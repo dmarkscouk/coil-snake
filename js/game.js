@@ -19,14 +19,32 @@ function angleDiff(a, b) {           // shortest signed turn from a to b
  * Tuning
  * ------------------------------------------------------------------ */
 const CFG = {
-  worldR:        1850,   // arena radius, world units
   startLen:      180,    // body length at spawn
   baseSpeed:     160,
   boostSpeed:    305,
-  turnRate:      3.6,    // rad/s, player
-  botTurnRate:   2.8,
-  botCount:      13,
-  foodTarget:    400,
+  turnRate:      10.8,   // rad/s, player — turns on a sixpence
+  botTurnRate:   3.0,    // rivals are deliberately clumsier than you
+
+  // The world has no edge. Food is generated per chunk around you and
+  // thrown away once you are far enough that you could never see it.
+  chunk:         500,    // world units per chunk
+  chunkRadius:   3,      // chunks loaded either side of you -> 7x7
+  foodPerChunk:  12,
+
+  // Rivals are kept topped up around you rather than living in a fixed arena.
+  botCount:      13,     // nearby rivals at the start
+  botsMax:       24,     // ...rising to this the further you roam
+  botsPerUnit:   2600,   // one extra rival per this much distance explored
+  spawnRingMin:  950,    // new rivals appear off-screen, never on top of you
+  spawnRingMax:  1700,
+  despawnR:      4200,   // rivals further than this are forgotten
+
+  // Anti-circling: how long a bot's winding is remembered, and how far it may
+  // wind one way before it is forced to straighten out.
+  coilHalfLife:  2.2,    // seconds
+  coilLimit:     4.2,    // radians of accumulated same-way turning
+
+  radarRange:    2200,   // world units shown by the radar in the corner
   boostDrain:    40,     // length lost per second of sprinting
   boostMinLen:   150,    // can't sprint below this (startLen is 180, so you start with a little in the tank)
   deathYield:    0.55,   // fraction of length that becomes food on death
@@ -114,6 +132,9 @@ class Snake {
     this.targetFood = null;
     this.boostUrge = 0;
     this.shimmer = Math.random() * TAU;
+    this.coil = 0;                  // running total of same-direction turning
+    this.unwind = false;            // forced to straighten out
+    this.wander = Math.random() * TAU;
   }
 
   get speed() { return this.boosting ? CFG.boostSpeed : CFG.baseSpeed; }
@@ -121,9 +142,14 @@ class Snake {
   steer(dt) {
     const rate = this.isPlayer ? CFG.turnRate : CFG.botTurnRate;
     const d = angleDiff(this.angle, this.targetAngle);
-    this.angle += clamp(d, -rate * dt, rate * dt);
+    const turn = clamp(d, -rate * dt, rate * dt);
+    this.angle += turn;
     if (this.angle > Math.PI) this.angle -= TAU;
     else if (this.angle < -Math.PI) this.angle += TAU;
+
+    // Winding one way adds up and fades; a snake going round and round keeps
+    // pushing this away from zero, while ordinary weaving cancels itself out.
+    this.coil = this.coil * Math.pow(0.5, dt / CFG.coilHalfLife) + turn;
   }
 
   update(dt, world) {
@@ -205,13 +231,17 @@ class Snake {
 const world = {
   snakes: [],
   food: [],
+  chunks: new Set(),
+  lastChunk: null,
+  explored: 0,
+  nextSpawnAt: 0,
   player: null,
   time: 0,
   running: false,
 
-  addFood(x, y, value, hue, drifting) {
+  addFood(x, y, value, hue, drifting, ck = null) {
     this.food.push({
-      x, y, value,
+      x, y, value, ck,
       r: clamp(3.2 + value * 0.42, 3.2, 13),
       hue: hue === undefined ? randInt(0, 359) : hue,
       ph: Math.random() * TAU,
@@ -220,11 +250,12 @@ const world = {
     });
   },
 
-  spawnPoint() {
-    // try to find somewhere not sitting inside another snake
+  /* Somewhere clear, out past the edge of the screen, measured from you. */
+  spawnPoint(minR, maxR) {
+    const base = this.player || { x: 0, y: 0 };
     for (let a = 0; a < 24; a++) {
-      const ang = rand(0, TAU), rad = Math.sqrt(Math.random()) * (CFG.worldR - 260);
-      const x = Math.cos(ang) * rad, y = Math.sin(ang) * rad;
+      const ang = rand(0, TAU), rad = rand(minR, maxR);
+      const x = base.x + Math.cos(ang) * rad, y = base.y + Math.sin(ang) * rad;
       let ok = true;
       for (const s of this.snakes) {
         if (!s.alive) continue;
@@ -235,11 +266,12 @@ const world = {
       }
       if (ok) return { x, y };
     }
-    return { x: rand(-400, 400), y: rand(-400, 400) };
+    const ang = rand(0, TAU);
+    return { x: base.x + Math.cos(ang) * maxR, y: base.y + Math.sin(ang) * maxR };
   },
 
-  addBot() {
-    const p = this.spawnPoint();
+  addBot(minR = CFG.spawnRingMin, maxR = CFG.spawnRingMax) {
+    const p = this.spawnPoint(minR, maxR);
     const hue = (205 + Math.random() * 255) % 360;   // keep green for the player
     const s = new Snake(p.x, p.y, rand(0, TAU), hue, false, pick(NAMES));
     s.len = CFG.startLen + rand(0, 150);
@@ -251,23 +283,92 @@ const world = {
   reset() {
     this.snakes.length = 0;
     this.food.length = 0;
+    this.chunks.clear();
+    this.lastChunk = null;
+    this.explored = 0;
+    this.nextSpawnAt = 0;
     this.time = 0;
 
+    // you always start at the origin of a world that has no middle and no edge
     const player = new Snake(0, 0, rand(0, TAU), 135, true, 'You');
     this.player = player;
     this.snakes.push(player);
     player.resample();
 
-    for (let i = 0; i < CFG.botCount; i++) this.addBot();
-    while (this.food.length < CFG.foodTarget) this.sprinkleFood();
+    this.updateChunks();
+    for (let i = 0; i < CFG.botCount; i++) this.addBot(450, 1800);
 
     camera.x = player.x; camera.y = player.y;
     camera.scale = targetScale(player);
   },
 
-  sprinkleFood() {
-    const ang = rand(0, TAU), rad = Math.sqrt(Math.random()) * (CFG.worldR - 40);
-    this.addFood(Math.cos(ang) * rad, Math.sin(ang) * rad, rand(3, 7), randInt(0, 359));
+  /* ---- endless world ------------------------------------------------ *
+   * Food belongs to a chunk. Chunks within reach of you are filled in as
+   * you travel and dropped once you leave, so the world is unbounded but
+   * only ever a few hundred pellets wide in memory. Walk away and come
+   * back and the pellets are freshly scattered — you can't see far enough
+   * to tell, and it means there is no global state to grow forever.
+   * ------------------------------------------------------------------- */
+  updateChunks() {
+    const p = this.player;
+    if (!p) return;
+    const C = CFG.chunk;
+    const cx0 = Math.floor(p.x / C), cy0 = Math.floor(p.y / C);
+    const here = cx0 + ',' + cy0;
+    if (here === this.lastChunk) return;        // only on crossing a border
+    this.lastChunk = here;
+
+    const R = CFG.chunkRadius;
+    const want = new Set();
+    for (let dx = -R; dx <= R; dx++) {
+      for (let dy = -R; dy <= R; dy++) {
+        const cx = cx0 + dx, cy = cy0 + dy, k = cx + ',' + cy;
+        want.add(k);
+        if (this.chunks.has(k)) continue;
+        this.chunks.add(k);
+        for (let i = 0; i < CFG.foodPerChunk; i++) {
+          this.addFood((cx + Math.random()) * C, (cy + Math.random()) * C,
+                       rand(3, 7), randInt(0, 359), false, k);
+        }
+      }
+    }
+
+    let dropped = false;
+    for (const k of this.chunks) if (!want.has(k)) { this.chunks.delete(k); dropped = true; }
+    if (dropped) {
+      // loose food (from deaths and sprinting) belongs to no chunk, so it is
+      // culled by distance instead
+      const reach = (R + 1) * C * 1.5;
+      this.food = this.food.filter(f => f.ck
+        ? want.has(f.ck)
+        : Math.abs(f.x - p.x) < reach && Math.abs(f.y - p.y) < reach);
+    }
+  },
+
+  /* The further you stray, the busier it gets. */
+  populationTarget() {
+    const p = this.player;
+    this.explored = Math.max(this.explored, Math.hypot(p.x, p.y));
+    return CFG.botCount +
+           Math.min(CFG.botsMax - CFG.botCount, Math.floor(this.explored / CFG.botsPerUnit));
+  },
+
+  maintainPopulation() {
+    const p = this.player;
+    if (!p) return;
+    const far = CFG.despawnR * CFG.despawnR;
+    this.snakes = this.snakes.filter(s =>
+      s.isPlayer || ((s.x - p.x) ** 2 + (s.y - p.y) ** 2) < far);
+
+    let rivals = 0;
+    for (const s of this.snakes) if (s.alive && !s.isPlayer) rivals++;
+    const deficit = this.populationTarget() - rivals;
+    if (deficit > 0 && this.time > this.nextSpawnAt) {
+      this.addBot();
+      // a lone replacement drifts in; a big shortfall (you have covered a lot
+      // of ground, or left everyone behind) fills in much faster
+      this.nextSpawnAt = this.time + rand(0.8, 2.2) / Math.max(1, deficit * 0.6);
+    }
   },
 
   /* A dead snake becomes food — longer snake, more food. */
@@ -279,7 +380,7 @@ const world = {
     for (let i = 0; i < pellets; i++) {
       const seg = segs[Math.min(segs.length - 1, Math.floor(i / pellets * segs.length))];
       if (!seg) break;
-      this.addFood(seg.x + rand(-7, 7), seg.y + rand(-7, 7), per, snake.hue, true);
+      this.addFood(seg.x + rand(-7, 7), seg.y + rand(-7, 7), per, snake.hue, true);   // loose: no chunk
     }
   },
 
@@ -291,10 +392,8 @@ const world = {
     if (snake.isPlayer) {
       shake = 18;
       endGame();
-    } else {
-      // keep the arena populated
-      setTimeout(() => { if (this.snakes.length) this.addBot(); }, 1400);
     }
+    // rivals are replaced by maintainPopulation, near wherever you are now
   },
 };
 
@@ -335,30 +434,41 @@ function botThink(s, dt) {
   }
   const tf = s.targetFood;
 
+  s.wander += rand(-0.5, 0.5) * s.think;
+
+  /* A snake that only ever optimises the next heading settles happily into a
+   * perfect circle — nothing in a chase says "stop orbiting". So track how far
+   * it has wound one way and, past a limit, refuse to wind any further until
+   * it has straightened out. */
+  const wind = Math.sign(s.coil);
+  if (Math.abs(s.coil) > CFG.coilLimit) s.unwind = true;
+  if (s.unwind && Math.abs(s.coil) < CFG.coilLimit * 0.35) s.unwind = false;
+
   const look = 70 + s.r * 3.4 + (s.boosting ? 70 : 0);
   const offsets = [0, 0.2, -0.2, 0.45, -0.45, 0.8, -0.8, 1.3, -1.3, 1.9, -1.9];
   let best = s.angle, bestCost = Infinity;
 
   for (const off of offsets) {
+    // while unwinding, turning further the same way is simply not on offer
+    if (s.unwind && off * wind > 0.2) continue;
+
     const a = s.angle + off;
     const ca = Math.cos(a), sa = Math.sin(a);
     let cost = Math.abs(off) * 6;
+
+    // the more it has wound up, the dearer another turn the same way becomes
+    cost += Math.max(0, off * wind) * Math.abs(s.coil) * 14;
 
     for (let step = 1; step <= 3; step++) {
       const d = look * (step / 3);
       const px = s.x + ca * d, py = s.y + sa * d;
       if (pathBlocked(s, px, py, s.r + 4)) { cost += 4000 / step; break; }
-      const wall = Math.hypot(px, py) - (CFG.worldR - s.r * 2 - 30);
-      if (wall > 0) { cost += 2500 / step; break; }
     }
-    // pull toward the chosen pellet
-    if (tf) {
-      const px = s.x + ca * look, py = s.y + sa * look;
-      cost += Math.hypot(tf.x - px, tf.y - py) * 0.6;
-    } else {
-      const px = s.x + ca * look, py = s.y + sa * look;
-      cost += Math.hypot(px, py) * 0.08;   // drift back to the middle
-    }
+    const px = s.x + ca * look, py = s.y + sa * look;
+    if (tf) cost += Math.hypot(tf.x - px, tf.y - py) * 0.6;          // chase the pellet
+    else cost += Math.hypot(s.x + Math.cos(s.wander) * look - px,    // or just roam
+                            s.y + Math.sin(s.wander) * look - py) * 0.5;
+
     if (cost < bestCost) { bestCost = cost; best = a; }
   }
   s.targetAngle = best;
@@ -511,7 +621,6 @@ function step(dt) {
   const deaths = [];
   for (const s of world.snakes) {
     if (!s.alive) continue;
-    if (Math.hypot(s.x, s.y) > CFG.worldR - s.r) { deaths.push([s, null]); continue; }
     bodyGrid.query(s.x, s.y, s.r + 34, scratch);
     for (let i = 0; i < scratch.length; i++) {
       const seg = scratch[i];
@@ -540,10 +649,9 @@ function step(dt) {
   }
   if (world.food.some(f => f.dead)) world.food = world.food.filter(f => !f.dead);
 
-  // top the arena back up
-  if (world.food.length < CFG.foodTarget && Math.random() < 0.6) world.sprinkleFood();
-
   world.snakes = world.snakes.filter(s => s.alive || s.isPlayer);
+  world.updateChunks();        // scatter food into newly reachable ground
+  world.maintainPopulation();  // and keep rivals around you as you travel
   world.time += dt;
 
   // camera
@@ -588,7 +696,7 @@ function draw() {
 
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   if (stick.active) drawStick();
-  drawMinimap();
+  drawRadar();
 }
 
 function drawBackground(vx0, vy0, vx1, vy1) {
@@ -599,18 +707,6 @@ function drawBackground(vx0, vy0, vx1, vy1) {
   for (let x = Math.floor(vx0 / G) * G; x < vx1; x += G) { ctx.moveTo(x, vy0); ctx.lineTo(x, vy1); }
   for (let y = Math.floor(vy0 / G) * G; y < vy1; y += G) { ctx.moveTo(vx0, y); ctx.lineTo(vx1, y); }
   ctx.stroke();
-
-  // arena edge
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(0, 0, CFG.worldR, 0, TAU);
-  ctx.strokeStyle = 'rgba(239,68,68,0.55)';
-  ctx.lineWidth = 6 / camera.scale;
-  ctx.stroke();
-  ctx.strokeStyle = 'rgba(239,68,68,0.12)';
-  ctx.lineWidth = 34 / camera.scale;
-  ctx.stroke();
-  ctx.restore();
 }
 
 function drawFood(vx0, vy0, vx1, vy1) {
@@ -712,13 +808,17 @@ function drawStick() {
   ctx.restore();
 }
 
-function drawMinimap() {
+/* No map without a world: a radar of who is near you instead, with distant
+ * rivals pinned to the rim so you can still tell which way trouble is. */
+function drawRadar() {
   const size = Math.min(104, Math.min(W, H) * 0.26);
   const pad = 16;
   const cx = pad + safeInset.l + size / 2;
   const cy = H - pad - safeInset.b - size / 2;
   const R = size / 2;
-  const k = R / CFG.worldR;
+  const k = R / CFG.radarRange;
+  const p = world.player;
+  if (!p) return;
 
   ctx.save();
   ctx.globalAlpha = 0.85;
@@ -727,12 +827,19 @@ function drawMinimap() {
   ctx.strokeStyle = 'rgba(148,163,214,0.3)'; ctx.lineWidth = 1; ctx.stroke();
 
   for (const s of world.snakes) {
-    if (!s.alive) continue;
+    if (!s.alive || s.isPlayer) continue;
+    let dx = (s.x - p.x) * k, dy = (s.y - p.y) * k;
+    const d = Math.hypot(dx, dy);
+    const offEdge = d > R - 3;
+    if (offEdge && d > 0.001) { dx = dx / d * (R - 3); dy = dy / d * (R - 3); }
     ctx.beginPath();
-    ctx.arc(cx + s.x * k, cy + s.y * k, s.isPlayer ? 3 : 2, 0, TAU);
-    ctx.fillStyle = s.isPlayer ? '#4ade80' : `hsla(${s.hue},80%,65%,0.75)`;
+    ctx.arc(cx + dx, cy + dy, offEdge ? 1.5 : 2.4, 0, TAU);
+    ctx.fillStyle = `hsla(${s.hue},80%,65%,${offEdge ? 0.4 : 0.85})`;
     ctx.fill();
   }
+
+  ctx.beginPath(); ctx.arc(cx, cy, 3, 0, TAU);
+  ctx.fillStyle = '#4ade80'; ctx.fill();
   ctx.restore();
 }
 
