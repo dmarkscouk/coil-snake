@@ -49,12 +49,16 @@ const CFG = {
   boostMinLen:   150,    // can't sprint below this (startLen is 180, so you start with a little in the tank)
   deathYield:    0.55,   // fraction of length that becomes food on death
   pathStep:      3,      // world units between recorded trail points
+  girth:         7,      // body radius, the same at every length
 };
 
 const NAMES = ['Viper','Mamba','Noodle','Zigzag','Cobra','Slinky','Taipan','Krait',
                'Python','Racer','Adder','Boa','Sidewinder','Ribbon','Garter','Rattler'];
 
-const radiusFor = len => 6.4 + Math.min(21, (len - CFG.startLen) * 0.0105);
+/* Thickness never changes. Growing makes you longer, not fatter — so the
+ * camera must hold still too, or zooming out to fit a bigger snake would make
+ * it look thinner anyway, which is the very thing we are avoiding. */
+const radiusFor = () => CFG.girth;
 
 /* ------------------------------------------------------------------ *
  * Canvas
@@ -197,7 +201,10 @@ class Snake {
   /* Walk the trail, dropping evenly spaced circles along it. */
   resample() {
     const r = this.r;
-    const spacing = Math.max(4, r * 0.5);
+    // Girth no longer grows, so this spacing alone decides how many circles a
+    // long snake costs. 0.9r still overlaps neighbours (round caps, radius r),
+    // so the body stays gap-free for collision while halving the count.
+    const spacing = Math.max(5, r * 0.9);
     const total = this.len;
     const segs = this.segments;
     segs.length = 0;
@@ -239,6 +246,7 @@ const world = {
   time: 0,
   running: false,
   paused: false,
+  pendingReload: false,
 
   addFood(x, y, value, hue, drifting, ck = null) {
     this.food.push({
@@ -490,7 +498,7 @@ const camera = { x: 0, y: 0, scale: 1 };
 let shake = 0;
 
 function targetScale(p) {
-  const viewR = 176 + p.r * 4.6;
+  const viewR = 176 + CFG.girth * 4.6;   // fixed: thickness on screen never drifts
   return clamp(Math.min(W, H) / 2 / viewR, 0.5, 1.6);
 }
 
@@ -853,9 +861,21 @@ function drawRadar() {
  * ------------------------------------------------------------------ */
 const hud = document.getElementById('hud');
 const statLen = document.getElementById('statLen');
-const statRank = document.getElementById('statRank');
-const board = document.getElementById('board');
+const statBest = document.getElementById('statBest');
+const bestStat = document.getElementById('bestStat');
 let hudTimer = 0;
+
+/* Your record lives in localStorage and nowhere else. It is held in memory
+ * while you play so the HUD can show it being beaten in real time, and
+ * written back occasionally rather than on every frame. */
+let bestLen = 0;
+try { bestLen = +(localStorage.getItem('coil.best') || 0) || 0; } catch (e) {}
+let bestDirty = false, bestSavedAt = performance.now();
+
+function saveBest() {
+  bestDirty = false;
+  try { localStorage.setItem('coil.best', Math.floor(bestLen)); } catch (e) {}
+}
 
 function updateHud(dt) {
   hudTimer -= dt;
@@ -865,17 +885,18 @@ function updateHud(dt) {
   const p = world.player;
   statLen.textContent = Math.floor(p.len);
 
-  const ranked = world.snakes.filter(s => s.alive).sort((a, b) => b.len - a.len);
-  const idx = ranked.indexOf(p);
-  statRank.textContent = idx >= 0 ? `${idx + 1} / ${ranked.length}` : '–';
-
-  let html = '';
-  for (let i = 0; i < Math.min(5, ranked.length); i++) {
-    const s = ranked[i];
-    html += `<li class="${s.isPlayer ? 'me' : ''}"><span class="n">${i + 1}. ${s.name}</span><span class="s">${Math.floor(s.len)}</span></li>`;
+  if (p.len > bestLen) {
+    bestLen = p.len;
+    bestDirty = true;
+    bestStat.classList.add('record');       // you are writing it right now
   }
-  if (idx >= 5) html += `<li class="me"><span class="n">${idx + 1}. You</span><span class="s">${Math.floor(p.len)}</span></li>`;
-  board.innerHTML = html;
+  statBest.textContent = Math.floor(bestLen);
+
+  // survive the app being killed mid-run without hammering storage. Wall
+  // clock, not world time: world time restarts with every run, which would
+  // push the next save further and further out.
+  const now = performance.now();
+  if (bestDirty && now - bestSavedAt > 5000) { bestSavedAt = now; saveBest(); }
 }
 
 /* ------------------------------------------------------------------ *
@@ -887,6 +908,9 @@ const playBtn = document.getElementById('playBtn');
 const tagline = document.getElementById('tagline');
 
 function startGame() {
+  // an update that arrived mid-run is swapped in between games, never during
+  if (world.pendingReload) { location.reload(); return; }
+  bestStat.classList.remove('record');
   resize();
   world.reset();
   world.running = true;
@@ -908,17 +932,18 @@ function endGame() {
   pauseBtn.classList.add('hidden');
   const p = world.player;
   const len = Math.floor(p.len);
-  const best = Math.max(len, +(localStorage.getItem('coil.best') || 0));
-  try { localStorage.setItem('coil.best', best); } catch (e) {}
+  if (p.len > bestLen) { bestLen = p.len; bestDirty = true; }
+  saveBest();
 
   document.getElementById('finalLen').textContent = len;
-  document.getElementById('bestLen').textContent = best;
+  document.getElementById('bestLen').textContent = Math.floor(bestLen);
   document.getElementById('finalKills').textContent = p.kills;
   results.classList.remove('hidden');
   tagline.textContent = p.kills > 0
     ? `You took down ${p.kills} ${p.kills === 1 ? 'rival' : 'rivals'} before someone cut you off.`
     : 'You ran into someone else’s tail.';
   playBtn.textContent = 'Play again';
+  if (len >= Math.floor(bestLen) && len > 0) tagline.textContent = 'A new best. ' + tagline.textContent;
   setTimeout(() => {
     overlay.classList.remove('hidden');
     hud.classList.add('hidden');
@@ -943,10 +968,8 @@ function pauseGame() {
   const p = world.player;
   if (p) p.boosting = false;
 
-  const ranked = world.snakes.filter(s => s.alive).sort((a, b) => b.len - a.len);
-  const idx = ranked.indexOf(p);
   document.getElementById('pauseLen').textContent = Math.floor(p.len);
-  document.getElementById('pauseRank').textContent = idx >= 0 ? `${idx + 1}/${ranked.length}` : '–';
+  document.getElementById('pauseBest').textContent = Math.floor(bestLen);
   document.getElementById('pauseKills').textContent = p.kills;
 
   pauseOverlay.classList.remove('hidden');
@@ -1019,9 +1042,16 @@ installBtn.addEventListener('click', async () => {
   installBtn.classList.add('hidden');
 });
 
+/* A new service worker has taken control. Reloading mid-run would throw away
+ * the game you are playing, so wait for the gap between runs. */
+window.__coilApplyUpdate = () => {
+  if (world.running && !world.paused) world.pendingReload = true;
+  else location.reload();
+};
+
 /* boot */
 resize();
 world.reset();
 world.running = false;
-document.getElementById('bestLen').textContent = localStorage.getItem('coil.best') || 0;
+document.getElementById('bestLen').textContent = Math.floor(bestLen);
 requestAnimationFrame(frame);

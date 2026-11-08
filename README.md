@@ -8,7 +8,7 @@ completely offline. Vanilla JS + Canvas 2D, no build step, no dependencies.
 ## Rules
 
 - Drag a finger anywhere to steer. The stick follows your thumb, so you never run out of room. Turning is deliberately sharp — a full U-turn takes about 0.28s and barely 30 units of ground.
-- Eat pellets to grow.
+- Eat pellets to grow. You get **longer, never fatter** — thickness is fixed, and the camera holds a fixed zoom so it stays that way on screen. Your longest run is kept on the device and shown in the corner, turning green the moment you beat it.
 - **You can cross your own tail freely.** Running your head into *another* snake kills you.
 - If a rival runs into *your* tail, they die.
 - Any dead snake bursts into food — the longer it was, the bigger the feast.
@@ -50,6 +50,13 @@ manifest.webmanifest    install metadata
 icons/                  generated PNG icon set
 tools/make-icons.js     regenerates icons/ (node tools/make-icons.js)
 ```
+
+## Updates
+
+The worker's cache name is bumped on every deploy. A changed worker installs
+the new files, claims the page, and the page reloads itself — between runs, so
+an update can never bin the game you are playing. That is what makes a change
+show up on the launch you open rather than the one after it.
 
 ## How the endless world works
 

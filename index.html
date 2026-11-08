@@ -21,10 +21,7 @@
 <div id="hud" class="hud hidden">
   <div class="hud-left">
     <div class="stat"><span class="label">Length</span><span id="statLen" class="value">0</span></div>
-    <div class="stat small"><span class="label">Rank</span><span id="statRank" class="value">–</span></div>
-  </div>
-  <div class="hud-right">
-    <ol id="board" class="board"></ol>
+    <div id="bestStat" class="stat small"><span class="label">Best</span><span id="statBest" class="value">0</span></div>
   </div>
 </div>
 
@@ -41,7 +38,7 @@
     <h2 class="paused">Paused</h2>
     <div class="results">
       <div class="result"><span class="label">Length</span><span id="pauseLen" class="value">0</span></div>
-      <div class="result"><span class="label">Rank</span><span id="pauseRank" class="value">–</span></div>
+      <div class="result"><span class="label">Best</span><span id="pauseBest" class="value">0</span></div>
       <div class="result"><span class="label">Kills</span><span id="pauseKills" class="value">0</span></div>
     </div>
     <button id="resumeBtn" class="play">Resume</button>
@@ -68,7 +65,29 @@
 <script src="js/game.js"></script>
 <script>
 if ('serviceWorker' in navigator) {
-  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+  addEventListener('load', async () => {
+    // Whether a worker was already driving this page tells us if a later
+    // takeover is a genuine update or just the first install claiming us.
+    const hadController = !!navigator.serviceWorker.controller;
+    let handled = false;
+
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || handled) return;
+      handled = true;
+      // the game decides when it is safe to swap; mid-run it waits
+      if (window.__coilApplyUpdate) window.__coilApplyUpdate();
+      else location.reload();
+    });
+
+    try {
+      const reg = await navigator.serviceWorker.register('sw.js');
+      reg.update();
+      // reopening an installed app does not re-check on its own
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) reg.update().catch(() => {});
+      });
+    } catch (e) {}
+  });
 }
 </script>
 </body>

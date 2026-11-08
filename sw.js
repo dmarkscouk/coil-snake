@@ -2,11 +2,16 @@
  *
  * Strategy: stale-while-revalidate for same-origin GETs. The cached copy is
  * served immediately (so launches are instant and the game works with no
- * network at all), while a fresh copy is fetched in the background and stored
- * for the next launch. Pure cache-first would pin the game at whatever version
- * was installed first; network-first would make offline launches wait.
+ * network at all), while a fresh copy is fetched in the background. Pure
+ * cache-first would pin the game at whatever version was installed first;
+ * network-first would make offline launches wait.
+ *
+ * CACHE is bumped on every deploy, so a changed worker installs the new files,
+ * skips waiting and claims the page. The page listens for that takeover and
+ * reloads itself between runs, which is what makes an update land on the
+ * launch you opened rather than the one after it.
  */
-const CACHE = 'coil-v5';
+const CACHE = 'coil-v9';
 const ASSETS = [
   './',
   './index.html',
@@ -46,6 +51,8 @@ self.addEventListener('fetch', e => {
 
   // an explicit bypass (devtools reload, cache:'no-store') must hit the network
   if (req.cache === 'no-store' || req.cache === 'reload') return;
+  // never serve the worker itself from cache, or it can never be replaced
+  if (new URL(req.url).pathname.endsWith('/sw.js')) return;
 
   e.respondWith((async () => {
     const cache = await caches.open(CACHE);
