@@ -28,7 +28,7 @@ const CFG = {
   botCount:      13,
   foodTarget:    400,
   boostDrain:    40,     // length lost per second of sprinting
-  boostMinLen:   200,    // can't sprint below this
+  boostMinLen:   150,    // can't sprint below this (startLen is 180, so you start with a little in the tank)
   deathYield:    0.55,   // fraction of length that becomes food on death
   pathStep:      3,      // world units between recorded trail points
 };
@@ -386,10 +386,21 @@ function targetScale(p) {
 /* ------------------------------------------------------------------ *
  * Input
  * ------------------------------------------------------------------ */
-const stick = { active: false, id: null, ox: 0, oy: 0, x: 0, y: 0 };
+const stick = {
+  active: false, id: null,
+  ox: 0, oy: 0, x: 0, y: 0,
+  downAt: 0, moved: 0, sprinting: false,
+};
 const LEASH = 64;
-let boostFromTouch = false, boostFromKey = false, boostFromBtn = false;
-const boostBtn = document.getElementById('boostBtn');
+
+/* Double-tap-and-hold to sprint: a quick tap, then press again and keep the
+ * finger down. The second press steers as usual, so you can keep turning
+ * while you burn. A tap counts only if it was short and barely moved. */
+const TAP_MS = 260, TAP_SLOP = 16, DOUBLE_MS = 330, DOUBLE_SLOP = 90;
+let lastTapEnd = 0, lastTapX = 0, lastTapY = 0;
+
+let boostFromSecondFinger = false, boostFromKey = false, boostFromMouse = false;
+const sprinting = () => stick.sprinting || boostFromSecondFinger || boostFromKey || boostFromMouse;
 
 function setStickTarget() {
   const dx = stick.x - stick.ox, dy = stick.y - stick.oy;
@@ -405,42 +416,57 @@ function setStickTarget() {
 canvas.addEventListener('pointerdown', e => {
   if (!world.running) return;
   try { canvas.setPointerCapture?.(e.pointerId); } catch (err) {}
-  if (e.pointerType === 'mouse') { boostFromTouch = true; return; }
-  if (stick.active) { boostFromTouch = true; return; }   // second finger sprints
+
+  if (e.pointerType === 'mouse') { boostFromMouse = true; return; }
+
+  if (stick.active) { boostFromSecondFinger = true; return; }   // second finger also sprints
+
+  const now = performance.now();
+  const isDouble = now - lastTapEnd < DOUBLE_MS &&
+                   Math.hypot(e.clientX - lastTapX, e.clientY - lastTapY) < DOUBLE_SLOP;
+
   stick.active = true; stick.id = e.pointerId;
   stick.ox = stick.x = e.clientX; stick.oy = stick.y = e.clientY;
+  stick.downAt = now; stick.moved = 0;
+  stick.sprinting = isDouble;
+  lastTapEnd = 0;
 }, { passive: true });
 
 canvas.addEventListener('pointermove', e => {
   if (!world.running) return;
   if (e.pointerType === 'mouse') {
     if (!world.player) return;
-    const sx = W / 2, sy = H / 2;
-    world.player.targetAngle = Math.atan2(e.clientY - sy, e.clientX - sx);
+    world.player.targetAngle = Math.atan2(e.clientY - H / 2, e.clientX - W / 2);
     return;
   }
   if (!stick.active || e.pointerId !== stick.id) return;
+  stick.moved += Math.hypot(e.clientX - stick.x, e.clientY - stick.y);
   stick.x = e.clientX; stick.y = e.clientY;
   setStickTarget();
 }, { passive: true });
 
 function endPointer(e) {
-  if (e.pointerType === 'mouse') { boostFromTouch = false; return; }
-  if (stick.active && e.pointerId === stick.id) { stick.active = false; stick.id = null; }
-  else boostFromTouch = false;
+  if (e.pointerType === 'mouse') { boostFromMouse = false; return; }
+  if (!stick.active || e.pointerId !== stick.id) { boostFromSecondFinger = false; return; }
+
+  const now = performance.now();
+  const wasTap = !stick.sprinting &&
+                 now - stick.downAt < TAP_MS &&
+                 stick.moved < TAP_SLOP;
+  if (wasTap) { lastTapEnd = now; lastTapX = stick.x; lastTapY = stick.y; }
+  else lastTapEnd = 0;
+
+  stick.active = false; stick.id = null; stick.sprinting = false;
 }
 canvas.addEventListener('pointerup', endPointer, { passive: true });
 canvas.addEventListener('pointercancel', endPointer, { passive: true });
 
-boostBtn.addEventListener('pointerdown', e => {
-  e.stopPropagation(); e.preventDefault();
-  boostFromBtn = true; boostBtn.classList.add('on');
-  try { boostBtn.setPointerCapture?.(e.pointerId); } catch (err) {}
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { boostFromKey = true; e.preventDefault(); }
+  if (e.code === 'Enter' && !world.running) startGame();
 });
-const releaseBtn = e => { e.stopPropagation(); boostFromBtn = false; boostBtn.classList.remove('on'); };
-boostBtn.addEventListener('pointerup', releaseBtn);
-boostBtn.addEventListener('pointercancel', releaseBtn);
-boostBtn.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('keyup', e => { if (e.code === 'Space') boostFromKey = false; });
+addEventListener('contextmenu', e => e.preventDefault());
 
 addEventListener('keydown', e => {
   if (e.code === 'Space') { boostFromKey = true; e.preventDefault(); }
@@ -456,7 +482,7 @@ function step(dt) {
   const player = world.player;
 
   if (player.alive) {
-    player.boosting = world.running && (boostFromTouch || boostFromKey || boostFromBtn) && player.len > CFG.boostMinLen;
+    player.boosting = world.running && sprinting() && player.len > CFG.boostMinLen;
   }
 
   for (const s of world.snakes) if (s.alive && !s.isPlayer) botThink(s, dt);
@@ -670,7 +696,7 @@ function drawStick() {
   ctx.save();
   ctx.beginPath();
   ctx.arc(stick.ox, stick.oy, LEASH, 0, TAU);
-  ctx.strokeStyle = 'rgba(232,237,255,0.16)';
+  ctx.strokeStyle = stick.sprinting ? 'rgba(250,204,21,0.3)' : 'rgba(232,237,255,0.16)';
   ctx.lineWidth = 2;
   ctx.stroke();
   const dx = stick.x - stick.ox, dy = stick.y - stick.oy;
@@ -678,9 +704,9 @@ function drawStick() {
   const a = Math.atan2(dy, dx);
   ctx.beginPath();
   ctx.arc(stick.ox + Math.cos(a) * d, stick.oy + Math.sin(a) * d, 20, 0, TAU);
-  ctx.fillStyle = 'rgba(74,222,128,0.28)';
+  ctx.fillStyle = stick.sprinting ? 'rgba(250,204,21,0.34)' : 'rgba(74,222,128,0.28)';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(74,222,128,0.6)';
+  ctx.strokeStyle = stick.sprinting ? 'rgba(250,204,21,0.75)' : 'rgba(74,222,128,0.6)';
   ctx.lineWidth = 1.5;
   ctx.stroke();
   ctx.restore();
@@ -752,12 +778,11 @@ function startGame() {
   resize();
   world.reset();
   world.running = true;
-  stick.active = false;
-  boostFromTouch = boostFromKey = boostFromBtn = false;
-  boostBtn.classList.remove('on');
+  stick.active = false; stick.sprinting = false;
+  boostFromSecondFinger = boostFromKey = boostFromMouse = false;
+  lastTapEnd = 0;
   overlay.classList.add('hidden');
   hud.classList.remove('hidden');
-  boostBtn.classList.remove('hidden');
   last = performance.now();
 }
 
@@ -779,7 +804,6 @@ function endGame() {
   setTimeout(() => {
     overlay.classList.remove('hidden');
     hud.classList.add('hidden');
-    boostBtn.classList.add('hidden');
   }, 700);
 }
 

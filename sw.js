@@ -6,7 +6,7 @@
  * for the next launch. Pure cache-first would pin the game at whatever version
  * was installed first; network-first would make offline launches wait.
  */
-const CACHE = 'coil-v2';
+const CACHE = 'coil-v3';
 const ASSETS = [
   './',
   './index.html',

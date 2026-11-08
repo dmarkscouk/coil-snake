@@ -10,7 +10,7 @@ completely offline. Vanilla JS + Canvas 2D, no build step, no dependencies.
 - **You can cross your own tail freely.** Running your head into *another* snake kills you.
 - If a rival runs into *your* tail, they die.
 - Any dead snake bursts into food — the longer it was, the bigger the feast.
-- Hold the ⚡ button (or a second finger, or space on desktop) to sprint. Sprinting burns length and leaves a trail of food behind you.
+- **Double-tap and hold** to sprint: tap once, then press and hold. You keep steering while you burn. A second finger held down works too. Sprinting costs length and leaves a trail of food behind you.
 
 On desktop the snake follows the mouse and click-or-space sprints.
 

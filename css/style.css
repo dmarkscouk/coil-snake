@@ -33,19 +33,6 @@ canvas#game{position:fixed;inset:0;width:100%;height:100%;display:block;touch-ac
 .board li.me{opacity:1;color:var(--accent)}
 .board li.me .s{color:var(--accent)}
 
-/* ---------- Boost button ---------- */
-.boost{
-  position:fixed;right:calc(var(--safe-r) + 22px);bottom:calc(var(--safe-b) + 28px);
-  width:84px;height:84px;border-radius:50%;border:1.5px solid rgba(74,222,128,.45);
-  background:radial-gradient(circle at 50% 35%,rgba(74,222,128,.22),rgba(74,222,128,.06));
-  color:var(--accent);display:grid;place-items:center;padding:0;
-  backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
-  transition:transform .08s ease, background .12s ease;touch-action:none;
-}
-.boost svg{width:34px;height:34px;fill:currentColor;filter:drop-shadow(0 0 8px rgba(74,222,128,.7))}
-.boost.on{transform:scale(.92);background:radial-gradient(circle at 50% 35%,rgba(74,222,128,.5),rgba(74,222,128,.16))}
-@media (pointer:fine){ .boost{opacity:.35} }
-
 /* ---------- Overlay ---------- */
 .overlay{
   position:fixed;inset:0;display:grid;place-items:center;padding:24px;
