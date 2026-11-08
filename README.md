@@ -1,5 +1,7 @@
 # Coil
 
+**Play / install: https://dmarkscouk.github.io/coil-snake/**
+
 A slither-style snake arena that installs to your phone's home screen and plays
 completely offline. Vanilla JS + Canvas 2D, no build step, no dependencies.
 
@@ -27,8 +29,8 @@ http(s) — opening `index.html` straight off the disk won't register one.
 
 ## Install on a phone
 
-Serve the folder somewhere your phone can reach it over **HTTPS** (or
-`localhost`), then:
+It's already served over HTTPS at
+**https://dmarkscouk.github.io/coil-snake/** — open that on your phone, then:
 
 - **iOS Safari** — Share → *Add to Home Screen*.
 - **Android Chrome** — the in-game *Install app* button, or ⋮ → *Install app*.
