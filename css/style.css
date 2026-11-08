@@ -1,0 +1,80 @@
+:root{
+  --bg:#070a12;
+  --ink:#e8edff;
+  --muted:#8e9ac4;
+  --accent:#4ade80;
+  --accent-dim:#1b7a44;
+  --safe-t:env(safe-area-inset-top,0px);
+  --safe-b:env(safe-area-inset-bottom,0px);
+  --safe-l:env(safe-area-inset-left,0px);
+  --safe-r:env(safe-area-inset-right,0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;margin:0;overflow:hidden;background:var(--bg);color:var(--ink)}
+body{
+  font-family:ui-rounded,"SF Pro Rounded",system-ui,-apple-system,"Segoe UI",sans-serif;
+  touch-action:none;overscroll-behavior:none;user-select:none;-webkit-user-select:none;
+}
+canvas#game{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+
+.hidden{display:none !important}
+
+/* ---------- HUD ---------- */
+.hud{position:fixed;inset:0;pointer-events:none;padding:calc(var(--safe-t) + 14px) calc(var(--safe-r) + 14px) 0 calc(var(--safe-l) + 14px);display:flex;justify-content:space-between;align-items:flex-start}
+.stat{display:flex;flex-direction:column;line-height:1}
+.stat .label{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.stat .value{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;text-shadow:0 2px 12px rgba(0,0,0,.6)}
+.stat.small{margin-top:10px}
+.stat.small .value{font-size:18px;color:#c7d2fe}
+.board{list-style:none;margin:0;padding:0;text-align:right;font-size:13px;font-variant-numeric:tabular-nums}
+.board li{display:flex;gap:10px;justify-content:flex-end;color:#b9c4ea;opacity:.85;padding:1px 0;text-shadow:0 1px 6px rgba(0,0,0,.7)}
+.board li .n{max-width:11ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.board li .s{color:#fff;font-weight:600;min-width:4ch}
+.board li.me{opacity:1;color:var(--accent)}
+.board li.me .s{color:var(--accent)}
+
+/* ---------- Boost button ---------- */
+.boost{
+  position:fixed;right:calc(var(--safe-r) + 22px);bottom:calc(var(--safe-b) + 28px);
+  width:84px;height:84px;border-radius:50%;border:1.5px solid rgba(74,222,128,.45);
+  background:radial-gradient(circle at 50% 35%,rgba(74,222,128,.22),rgba(74,222,128,.06));
+  color:var(--accent);display:grid;place-items:center;padding:0;
+  backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);
+  transition:transform .08s ease, background .12s ease;touch-action:none;
+}
+.boost svg{width:34px;height:34px;fill:currentColor;filter:drop-shadow(0 0 8px rgba(74,222,128,.7))}
+.boost.on{transform:scale(.92);background:radial-gradient(circle at 50% 35%,rgba(74,222,128,.5),rgba(74,222,128,.16))}
+@media (pointer:fine){ .boost{opacity:.35} }
+
+/* ---------- Overlay ---------- */
+.overlay{
+  position:fixed;inset:0;display:grid;place-items:center;padding:24px;
+  background:radial-gradient(ellipse at 50% 35%,rgba(16,24,48,.72),rgba(5,7,14,.94));
+  backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);
+}
+.panel{width:min(420px,100%);text-align:center}
+.title{
+  margin:0 0 6px;font-size:clamp(46px,16vw,78px);font-weight:800;letter-spacing:-.03em;
+  background:linear-gradient(180deg,#eafff2,#4ade80 70%,#1d9c57);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+  filter:drop-shadow(0 6px 26px rgba(74,222,128,.35));
+}
+.tagline{margin:0 0 22px;color:var(--muted);font-size:14.5px;line-height:1.6}
+.results{display:flex;justify-content:center;gap:12px;margin:0 0 22px}
+.result{flex:1;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08);border-radius:14px;padding:12px 6px}
+.result .label{display:block;font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:4px}
+.result .value{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
+.play{
+  display:block;width:100%;padding:17px;border:none;border-radius:16px;
+  background:linear-gradient(180deg,#5ef08f,#22b65f);color:#032312;
+  font:inherit;font-size:19px;font-weight:800;letter-spacing:.02em;
+  box-shadow:0 10px 30px rgba(34,182,95,.35);cursor:pointer;
+}
+.play:active{transform:translateY(1px)}
+.install{
+  display:block;width:100%;margin-top:10px;padding:13px;border-radius:14px;
+  border:1px solid rgba(255,255,255,.16);background:transparent;color:var(--ink);
+  font:inherit;font-size:15px;cursor:pointer;
+}
+.hint{margin:18px 0 0;color:#6b78a3;font-size:12.5px}
+.hint b{color:var(--accent)}

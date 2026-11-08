@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, maximum-scale=1">
+<meta name="theme-color" content="#070a12">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Coil">
+<meta name="description" content="Steer your snake, eat, grow, and cut off rivals. Installable and playable offline.">
+<title>Coil</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud" class="hud hidden">
+  <div class="hud-left">
+    <div class="stat"><span class="label">Length</span><span id="statLen" class="value">0</span></div>
+    <div class="stat small"><span class="label">Rank</span><span id="statRank" class="value">–</span></div>
+  </div>
+  <div class="hud-right">
+    <ol id="board" class="board"></ol>
+  </div>
+</div>
+
+<button id="boostBtn" class="boost hidden" aria-label="Boost">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg>
+</button>
+
+<div id="overlay" class="overlay">
+  <div class="panel">
+    <h1 class="title">Coil</h1>
+    <p id="tagline" class="tagline">Drag anywhere to steer. Eat to grow.<br>Cross your own tail freely — never anyone else's.</p>
+    <div id="results" class="results hidden">
+      <div class="result"><span class="label">Length</span><span id="finalLen" class="value">0</span></div>
+      <div class="result"><span class="label">Best</span><span id="bestLen" class="value">0</span></div>
+      <div class="result"><span class="label">Kills</span><span id="finalKills" class="value">0</span></div>
+    </div>
+    <button id="playBtn" class="play">Play</button>
+    <button id="installBtn" class="install hidden">Install app</button>
+    <p class="hint" id="hint">Hold the <b>⚡</b> button to sprint — it costs length.</p>
+  </div>
+</div>
+
+<script src="js/game.js"></script>
+<script>
+if ('serviceWorker' in navigator) {
+  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+</script>
+</body>
+</html>

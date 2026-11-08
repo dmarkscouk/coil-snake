@@ -1,0 +1,828 @@
+'use strict';
+/* Coil — a slither-style snake game. Canvas 2D, no dependencies. */
+
+/* ------------------------------------------------------------------ *
+ * Math helpers
+ * ------------------------------------------------------------------ */
+const TAU = Math.PI * 2;
+const rand = (a, b) => a + Math.random() * (b - a);
+const randInt = (a, b) => Math.floor(rand(a, b + 1));
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const pick = arr => arr[(Math.random() * arr.length) | 0];
+function angleDiff(a, b) {           // shortest signed turn from a to b
+  let d = (b - a + Math.PI) % TAU;
+  if (d < 0) d += TAU;
+  return d - Math.PI;
+}
+
+/* ------------------------------------------------------------------ *
+ * Tuning
+ * ------------------------------------------------------------------ */
+const CFG = {
+  worldR:        1850,   // arena radius, world units
+  startLen:      180,    // body length at spawn
+  baseSpeed:     160,
+  boostSpeed:    305,
+  turnRate:      3.6,    // rad/s, player
+  botTurnRate:   2.8,
+  botCount:      13,
+  foodTarget:    400,
+  boostDrain:    40,     // length lost per second of sprinting
+  boostMinLen:   200,    // can't sprint below this
+  deathYield:    0.55,   // fraction of length that becomes food on death
+  pathStep:      3,      // world units between recorded trail points
+};
+
+const NAMES = ['Viper','Mamba','Noodle','Zigzag','Cobra','Slinky','Taipan','Krait',
+               'Python','Racer','Adder','Boa','Sidewinder','Ribbon','Garter','Rattler'];
+
+const radiusFor = len => 6.4 + Math.min(21, (len - CFG.startLen) * 0.0105);
+
+/* ------------------------------------------------------------------ *
+ * Canvas
+ * ------------------------------------------------------------------ */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha: false });
+let W = 0, H = 0, DPR = 1;
+
+const safeInset = { l: 0, b: 0 };
+function readSafeInsets() {
+  const cs = getComputedStyle(document.documentElement);
+  safeInset.l = parseFloat(cs.getPropertyValue("--safe-l")) || 0;
+  safeInset.b = parseFloat(cs.getPropertyValue("--safe-b")) || 0;
+}
+
+function resize() {
+  readSafeInsets();
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = canvas.clientWidth;
+  H = canvas.clientHeight;
+  canvas.width = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+}
+addEventListener('resize', resize);
+addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+/* ------------------------------------------------------------------ *
+ * Spatial hash — bodies and food each get one
+ * ------------------------------------------------------------------ */
+class Grid {
+  constructor(cell) { this.cell = cell; this.map = new Map(); }
+  clear() { this.map.clear(); }
+  _key(cx, cy) { return cx * 73856093 ^ cy * 19349663; }
+  insert(x, y, item) {
+    const k = this._key(Math.floor(x / this.cell), Math.floor(y / this.cell));
+    const b = this.map.get(k);
+    if (b) b.push(item); else this.map.set(k, [item]);
+  }
+  query(x, y, r, out) {
+    out.length = 0;
+    const c = this.cell;
+    const x0 = Math.floor((x - r) / c), x1 = Math.floor((x + r) / c);
+    const y0 = Math.floor((y - r) / c), y1 = Math.floor((y + r) / c);
+    for (let cx = x0; cx <= x1; cx++)
+      for (let cy = y0; cy <= y1; cy++) {
+        const b = this.map.get(this._key(cx, cy));
+        if (b) for (let i = 0; i < b.length; i++) out.push(b[i]);
+      }
+    return out;
+  }
+}
+const bodyGrid = new Grid(80);
+const foodGrid = new Grid(120);
+const scratch = [];
+
+/* ------------------------------------------------------------------ *
+ * Snake
+ * ------------------------------------------------------------------ */
+class Snake {
+  constructor(x, y, angle, hue, isPlayer, name) {
+    this.x = x; this.y = y;
+    this.angle = angle; this.targetAngle = angle;
+    this.hue = hue;
+    this.isPlayer = !!isPlayer;
+    this.name = name;
+    this.len = CFG.startLen;
+    this.r = radiusFor(this.len);
+    this.alive = true;
+    this.boosting = false;
+    this.kills = 0;
+    this.path = [{ x, y, s: 0 }];   // newest first; s = distance to previous point
+    this.pathLen = 0;
+    this.segments = [];             // resampled collision/draw circles
+    this.think = 0;
+    this.targetFood = null;
+    this.boostUrge = 0;
+    this.shimmer = Math.random() * TAU;
+  }
+
+  get speed() { return this.boosting ? CFG.boostSpeed : CFG.baseSpeed; }
+
+  steer(dt) {
+    const rate = this.isPlayer ? CFG.turnRate : CFG.botTurnRate;
+    const d = angleDiff(this.angle, this.targetAngle);
+    this.angle += clamp(d, -rate * dt, rate * dt);
+    if (this.angle > Math.PI) this.angle -= TAU;
+    else if (this.angle < -Math.PI) this.angle += TAU;
+  }
+
+  update(dt, world) {
+    this.steer(dt);
+
+    if (this.boosting && this.len > CFG.boostMinLen) {
+      const burn = CFG.boostDrain * dt;
+      this.len -= burn;
+      this.shimmer += dt * 14;
+      // sprinting sheds length as food behind the tail
+      this.burnAccum = (this.burnAccum || 0) + burn;
+      if (this.burnAccum > 9) {
+        this.burnAccum = 0;
+        const tail = this.segments[this.segments.length - 1];
+        if (tail) world.addFood(tail.x + rand(-5, 5), tail.y + rand(-5, 5), 6, this.hue);
+      }
+    } else {
+      this.boosting = false;
+    }
+
+    const v = this.speed;
+    this.x += Math.cos(this.angle) * v * dt;
+    this.y += Math.sin(this.angle) * v * dt;
+
+    const head = this.path[0];
+    const dx = this.x - head.x, dy = this.y - head.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist >= CFG.pathStep) {
+      this.path.unshift({ x: this.x, y: this.y, s: dist });
+      this.pathLen += dist;
+    }
+    // trim trail we no longer need
+    const keep = this.len + 40;
+    while (this.path.length > 2) {
+      const last = this.path[this.path.length - 1];
+      if (this.pathLen - last.s < keep) break;
+      this.pathLen -= last.s;
+      this.path.pop();
+    }
+
+    this.r = radiusFor(this.len);
+    this.resample();
+  }
+
+  /* Walk the trail, dropping evenly spaced circles along it. */
+  resample() {
+    const r = this.r;
+    const spacing = Math.max(4, r * 0.5);
+    const total = this.len;
+    const segs = this.segments;
+    segs.length = 0;
+    segs.push({ x: this.x, y: this.y, r, owner: this });
+
+    let px = this.x, py = this.y;
+    let travelled = 0, next = spacing, i = 0;
+    const path = this.path;
+    while (i < path.length && next <= total) {
+      const p = path[i];
+      const dx = p.x - px, dy = p.y - py;
+      const d = Math.hypot(dx, dy);
+      if (d > 1e-6) {
+        while (travelled + d >= next && next <= total) {
+          const t = (next - travelled) / d;
+          segs.push({ x: px + dx * t, y: py + dy * t, r, owner: this });
+          next += spacing;
+        }
+        travelled += d;
+      }
+      px = p.x; py = p.y; i++;
+    }
+  }
+
+  grow(amount) { this.len += amount; }
+}
+
+/* ------------------------------------------------------------------ *
+ * World
+ * ------------------------------------------------------------------ */
+const world = {
+  snakes: [],
+  food: [],
+  player: null,
+  time: 0,
+  running: false,
+
+  addFood(x, y, value, hue, drifting) {
+    this.food.push({
+      x, y, value,
+      r: clamp(3.2 + value * 0.42, 3.2, 13),
+      hue: hue === undefined ? randInt(0, 359) : hue,
+      ph: Math.random() * TAU,
+      vx: drifting ? rand(-18, 18) : 0,
+      vy: drifting ? rand(-18, 18) : 0,
+    });
+  },
+
+  spawnPoint() {
+    // try to find somewhere not sitting inside another snake
+    for (let a = 0; a < 24; a++) {
+      const ang = rand(0, TAU), rad = Math.sqrt(Math.random()) * (CFG.worldR - 260);
+      const x = Math.cos(ang) * rad, y = Math.sin(ang) * rad;
+      let ok = true;
+      for (const s of this.snakes) {
+        if (!s.alive) continue;
+        for (const seg of s.segments) {
+          if ((seg.x - x) ** 2 + (seg.y - y) ** 2 < 170 * 170) { ok = false; break; }
+        }
+        if (!ok) break;
+      }
+      if (ok) return { x, y };
+    }
+    return { x: rand(-400, 400), y: rand(-400, 400) };
+  },
+
+  addBot() {
+    const p = this.spawnPoint();
+    const hue = (205 + Math.random() * 255) % 360;   // keep green for the player
+    const s = new Snake(p.x, p.y, rand(0, TAU), hue, false, pick(NAMES));
+    s.len = CFG.startLen + rand(0, 150);
+    s.resample();
+    this.snakes.push(s);
+    return s;
+  },
+
+  reset() {
+    this.snakes.length = 0;
+    this.food.length = 0;
+    this.time = 0;
+
+    const player = new Snake(0, 0, rand(0, TAU), 135, true, 'You');
+    this.player = player;
+    this.snakes.push(player);
+    player.resample();
+
+    for (let i = 0; i < CFG.botCount; i++) this.addBot();
+    while (this.food.length < CFG.foodTarget) this.sprinkleFood();
+
+    camera.x = player.x; camera.y = player.y;
+    camera.scale = targetScale(player);
+  },
+
+  sprinkleFood() {
+    const ang = rand(0, TAU), rad = Math.sqrt(Math.random()) * (CFG.worldR - 40);
+    this.addFood(Math.cos(ang) * rad, Math.sin(ang) * rad, rand(3, 7), randInt(0, 359));
+  },
+
+  /* A dead snake becomes food — longer snake, more food. */
+  scatter(snake) {
+    const segs = snake.segments;
+    const pellets = clamp(Math.floor(snake.len / 24), 6, 160);
+    const totalValue = snake.len * CFG.deathYield;
+    const per = totalValue / pellets;
+    for (let i = 0; i < pellets; i++) {
+      const seg = segs[Math.min(segs.length - 1, Math.floor(i / pellets * segs.length))];
+      if (!seg) break;
+      this.addFood(seg.x + rand(-7, 7), seg.y + rand(-7, 7), per, snake.hue, true);
+    }
+  },
+
+  kill(snake, killer) {
+    if (!snake.alive) return;
+    snake.alive = false;
+    this.scatter(snake);
+    if (killer && killer !== snake) killer.kills++;
+    if (snake.isPlayer) {
+      shake = 18;
+      endGame();
+    } else {
+      // keep the arena populated
+      setTimeout(() => { if (this.snakes.length) this.addBot(); }, 1400);
+    }
+  },
+};
+
+/* ------------------------------------------------------------------ *
+ * Bot brains
+ * ------------------------------------------------------------------ */
+function nearestFood(s, radius) {
+  foodGrid.query(s.x, s.y, radius, scratch);
+  let best = null, bestD = Infinity;
+  for (let i = 0; i < scratch.length; i++) {
+    const f = scratch[i];
+    const d = (f.x - s.x) ** 2 + (f.y - s.y) ** 2;
+    // prefer fat pellets
+    const score = d / (1 + f.value * 0.5);
+    if (score < bestD) { bestD = score; best = f; }
+  }
+  return best;
+}
+
+function pathBlocked(s, x, y, pad) {
+  bodyGrid.query(x, y, pad + 32, scratch);
+  for (let i = 0; i < scratch.length; i++) {
+    const seg = scratch[i];
+    if (seg.owner === s) continue;
+    const dr = pad + seg.r;
+    if ((seg.x - x) ** 2 + (seg.y - y) ** 2 < dr * dr) return true;
+  }
+  return false;
+}
+
+function botThink(s, dt) {
+  s.think -= dt;
+  if (s.think > 0) return;
+  s.think = rand(0.07, 0.13);
+
+  if (!s.targetFood || s.targetFood.dead || Math.random() < 0.12) {
+    s.targetFood = nearestFood(s, 620);
+  }
+  const tf = s.targetFood;
+
+  const look = 70 + s.r * 3.4 + (s.boosting ? 70 : 0);
+  const offsets = [0, 0.2, -0.2, 0.45, -0.45, 0.8, -0.8, 1.3, -1.3, 1.9, -1.9];
+  let best = s.angle, bestCost = Infinity;
+
+  for (const off of offsets) {
+    const a = s.angle + off;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    let cost = Math.abs(off) * 6;
+
+    for (let step = 1; step <= 3; step++) {
+      const d = look * (step / 3);
+      const px = s.x + ca * d, py = s.y + sa * d;
+      if (pathBlocked(s, px, py, s.r + 4)) { cost += 4000 / step; break; }
+      const wall = Math.hypot(px, py) - (CFG.worldR - s.r * 2 - 30);
+      if (wall > 0) { cost += 2500 / step; break; }
+    }
+    // pull toward the chosen pellet
+    if (tf) {
+      const px = s.x + ca * look, py = s.y + sa * look;
+      cost += Math.hypot(tf.x - px, tf.y - py) * 0.6;
+    } else {
+      const px = s.x + ca * look, py = s.y + sa * look;
+      cost += Math.hypot(px, py) * 0.08;   // drift back to the middle
+    }
+    if (cost < bestCost) { bestCost = cost; best = a; }
+  }
+  s.targetAngle = best;
+
+  // occasional sprint when well fed and chasing something worthwhile
+  s.boostUrge -= s.think;
+  if (s.boostUrge <= 0) {
+    s.boostUrge = rand(1.5, 5);
+    s.boosting = s.len > 420 && Math.random() < 0.3;
+  }
+  if (s.len <= CFG.boostMinLen) s.boosting = false;
+}
+
+/* ------------------------------------------------------------------ *
+ * Camera
+ * ------------------------------------------------------------------ */
+const camera = { x: 0, y: 0, scale: 1 };
+let shake = 0;
+
+function targetScale(p) {
+  const viewR = 176 + p.r * 4.6;
+  return clamp(Math.min(W, H) / 2 / viewR, 0.5, 1.6);
+}
+
+/* ------------------------------------------------------------------ *
+ * Input
+ * ------------------------------------------------------------------ */
+const stick = { active: false, id: null, ox: 0, oy: 0, x: 0, y: 0 };
+const LEASH = 64;
+let boostFromTouch = false, boostFromKey = false, boostFromBtn = false;
+const boostBtn = document.getElementById('boostBtn');
+
+function setStickTarget() {
+  const dx = stick.x - stick.ox, dy = stick.y - stick.oy;
+  const d = Math.hypot(dx, dy);
+  if (d < 8) return;
+  if (d > LEASH) {                       // let the origin trail the finger
+    stick.ox = stick.x - dx / d * LEASH;
+    stick.oy = stick.y - dy / d * LEASH;
+  }
+  if (world.player) world.player.targetAngle = Math.atan2(dy, dx);
+}
+
+canvas.addEventListener('pointerdown', e => {
+  if (!world.running) return;
+  try { canvas.setPointerCapture?.(e.pointerId); } catch (err) {}
+  if (e.pointerType === 'mouse') { boostFromTouch = true; return; }
+  if (stick.active) { boostFromTouch = true; return; }   // second finger sprints
+  stick.active = true; stick.id = e.pointerId;
+  stick.ox = stick.x = e.clientX; stick.oy = stick.y = e.clientY;
+}, { passive: true });
+
+canvas.addEventListener('pointermove', e => {
+  if (!world.running) return;
+  if (e.pointerType === 'mouse') {
+    if (!world.player) return;
+    const sx = W / 2, sy = H / 2;
+    world.player.targetAngle = Math.atan2(e.clientY - sy, e.clientX - sx);
+    return;
+  }
+  if (!stick.active || e.pointerId !== stick.id) return;
+  stick.x = e.clientX; stick.y = e.clientY;
+  setStickTarget();
+}, { passive: true });
+
+function endPointer(e) {
+  if (e.pointerType === 'mouse') { boostFromTouch = false; return; }
+  if (stick.active && e.pointerId === stick.id) { stick.active = false; stick.id = null; }
+  else boostFromTouch = false;
+}
+canvas.addEventListener('pointerup', endPointer, { passive: true });
+canvas.addEventListener('pointercancel', endPointer, { passive: true });
+
+boostBtn.addEventListener('pointerdown', e => {
+  e.stopPropagation(); e.preventDefault();
+  boostFromBtn = true; boostBtn.classList.add('on');
+  try { boostBtn.setPointerCapture?.(e.pointerId); } catch (err) {}
+});
+const releaseBtn = e => { e.stopPropagation(); boostFromBtn = false; boostBtn.classList.remove('on'); };
+boostBtn.addEventListener('pointerup', releaseBtn);
+boostBtn.addEventListener('pointercancel', releaseBtn);
+boostBtn.addEventListener('contextmenu', e => e.preventDefault());
+
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { boostFromKey = true; e.preventDefault(); }
+  if (e.code === 'Enter' && !world.running) startGame();
+});
+addEventListener('keyup', e => { if (e.code === 'Space') boostFromKey = false; });
+addEventListener('contextmenu', e => e.preventDefault());
+
+/* ------------------------------------------------------------------ *
+ * Simulation step
+ * ------------------------------------------------------------------ */
+function step(dt) {
+  const player = world.player;
+
+  if (player.alive) {
+    player.boosting = world.running && (boostFromTouch || boostFromKey || boostFromBtn) && player.len > CFG.boostMinLen;
+  }
+
+  for (const s of world.snakes) if (s.alive && !s.isPlayer) botThink(s, dt);
+  for (const s of world.snakes) if (s.alive) s.update(dt, world);
+
+  // drifting death-food slows to a stop
+  for (const f of world.food) {
+    if (f.vx || f.vy) {
+      f.x += f.vx * dt; f.y += f.vy * dt;
+      f.vx *= 0.92; f.vy *= 0.92;
+      if (Math.abs(f.vx) < 1) { f.vx = 0; f.vy = 0; }
+    }
+  }
+
+  // rebuild hashes
+  bodyGrid.clear();
+  for (const s of world.snakes) {
+    if (!s.alive) continue;
+    const segs = s.segments;
+    for (let i = 0; i < segs.length; i++) bodyGrid.insert(segs[i].x, segs[i].y, segs[i]);
+  }
+  foodGrid.clear();
+  for (const f of world.food) foodGrid.insert(f.x, f.y, f);
+
+  // collisions: head against every other snake's body
+  const deaths = [];
+  for (const s of world.snakes) {
+    if (!s.alive) continue;
+    if (Math.hypot(s.x, s.y) > CFG.worldR - s.r) { deaths.push([s, null]); continue; }
+    bodyGrid.query(s.x, s.y, s.r + 34, scratch);
+    for (let i = 0; i < scratch.length; i++) {
+      const seg = scratch[i];
+      if (seg.owner === s) continue;           // your own tail is safe
+      const rr = s.r * 0.86 + seg.r;
+      if ((seg.x - s.x) ** 2 + (seg.y - s.y) ** 2 < rr * rr) { deaths.push([s, seg.owner]); break; }
+    }
+  }
+  for (const [s, killer] of deaths) world.kill(s, killer);
+
+  // eating
+  for (const s of world.snakes) {
+    if (!s.alive) continue;
+    const reach = s.r + 16;
+    foodGrid.query(s.x, s.y, reach + 14, scratch);
+    for (let i = 0; i < scratch.length; i++) {
+      const f = scratch[i];
+      if (f.dead) continue;
+      const rr = reach + f.r;
+      if ((f.x - s.x) ** 2 + (f.y - s.y) ** 2 < rr * rr) {
+        f.dead = true;
+        s.grow(f.value);
+        if (s.isPlayer) pops.push({ x: f.x, y: f.y, t: 0, hue: f.hue });
+      }
+    }
+  }
+  if (world.food.some(f => f.dead)) world.food = world.food.filter(f => !f.dead);
+
+  // top the arena back up
+  if (world.food.length < CFG.foodTarget && Math.random() < 0.6) world.sprinkleFood();
+
+  world.snakes = world.snakes.filter(s => s.alive || s.isPlayer);
+  world.time += dt;
+
+  // camera
+  const cx = player.x, cy = player.y;
+  const k = 1 - Math.pow(0.0016, dt);
+  camera.x += (cx - camera.x) * k;
+  camera.y += (cy - camera.y) * k;
+  camera.scale += (targetScale(player) - camera.scale) * (1 - Math.pow(0.08, dt));
+  if (shake > 0) shake = Math.max(0, shake - dt * 40);
+}
+
+/* ------------------------------------------------------------------ *
+ * Rendering
+ * ------------------------------------------------------------------ */
+const pops = [];
+
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = '#070a12';
+  ctx.fillRect(0, 0, W, H);
+
+  const sc = camera.scale;
+  let ox = W / 2 - camera.x * sc, oy = H / 2 - camera.y * sc;
+  if (shake > 0) { ox += rand(-shake, shake); oy += rand(-shake, shake); }
+
+  ctx.save();
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.translate(ox, oy);
+  ctx.scale(sc, sc);
+
+  // visible world rect
+  const vx0 = (0 - ox) / sc, vy0 = (0 - oy) / sc;
+  const vx1 = (W - ox) / sc, vy1 = (H - oy) / sc;
+
+  drawBackground(vx0, vy0, vx1, vy1);
+  drawFood(vx0, vy0, vx1, vy1);
+  for (const s of world.snakes) if (s.alive && !s.isPlayer) drawSnake(s, vx0, vy0, vx1, vy1);
+  if (world.player.alive) drawSnake(world.player, vx0, vy0, vx1, vy1);
+  drawPops();
+
+  ctx.restore();
+
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (stick.active) drawStick();
+  drawMinimap();
+}
+
+function drawBackground(vx0, vy0, vx1, vy1) {
+  const G = 110;
+  ctx.lineWidth = 1 / camera.scale;
+  ctx.strokeStyle = 'rgba(99,122,196,0.07)';
+  ctx.beginPath();
+  for (let x = Math.floor(vx0 / G) * G; x < vx1; x += G) { ctx.moveTo(x, vy0); ctx.lineTo(x, vy1); }
+  for (let y = Math.floor(vy0 / G) * G; y < vy1; y += G) { ctx.moveTo(vx0, y); ctx.lineTo(vx1, y); }
+  ctx.stroke();
+
+  // arena edge
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, CFG.worldR, 0, TAU);
+  ctx.strokeStyle = 'rgba(239,68,68,0.55)';
+  ctx.lineWidth = 6 / camera.scale;
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(239,68,68,0.12)';
+  ctx.lineWidth = 34 / camera.scale;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawFood(vx0, vy0, vx1, vy1) {
+  const t = world.time;
+  for (const f of world.food) {
+    if (f.x < vx0 - 20 || f.x > vx1 + 20 || f.y < vy0 - 20 || f.y > vy1 + 20) continue;
+    const pulse = 0.78 + 0.22 * Math.sin(t * 3 + f.ph);
+    const r = f.r * pulse;
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, r * 2.6, 0, TAU);
+    ctx.fillStyle = `hsla(${f.hue},90%,62%,0.13)`;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(f.x, f.y, r, 0, TAU);
+    ctx.fillStyle = `hsl(${f.hue},92%,66%)`;
+    ctx.fill();
+  }
+}
+
+function drawSnake(s, vx0, vy0, vx1, vy1) {
+  const segs = s.segments;
+  if (segs.length < 2) return;
+  // cheap off-screen cull on the head and tail
+  const pad = 200;
+  const tail = segs[segs.length - 1];
+  if ((s.x < vx0 - pad && tail.x < vx0 - pad) || (s.x > vx1 + pad && tail.x > vx1 + pad) ||
+      (s.y < vy0 - pad && tail.y < vy0 - pad) || (s.y > vy1 + pad && tail.y > vy1 + pad)) return;
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  ctx.beginPath();
+  ctx.moveTo(segs[0].x, segs[0].y);
+  for (let i = 1; i < segs.length; i++) ctx.lineTo(segs[i].x, segs[i].y);
+
+  const lit = s.boosting ? 14 : 0;
+  ctx.strokeStyle = `hsla(${s.hue},95%,${62 + lit}%,${s.boosting ? 0.3 : 0.16})`;
+  ctx.lineWidth = s.r * 2 + 12;
+  ctx.stroke();
+
+  ctx.strokeStyle = `hsl(${s.hue},72%,${44 + lit}%)`;
+  ctx.lineWidth = s.r * 2;
+  ctx.stroke();
+
+  ctx.strokeStyle = `hsl(${s.hue},92%,${66 + lit}%)`;
+  ctx.lineWidth = s.r * 0.95;
+  ctx.stroke();
+
+  drawHead(s);
+}
+
+function drawHead(s) {
+  const r = s.r;
+  const ca = Math.cos(s.angle), sa = Math.sin(s.angle);
+  const px = -sa, py = ca;                       // perpendicular
+  const ex = s.x + ca * r * 0.34, ey = s.y + sa * r * 0.34;
+  const off = r * 0.52, eyeR = r * 0.40, pupR = r * 0.21;
+
+  for (const side of [1, -1]) {
+    const x = ex + px * off * side, y = ey + py * off * side;
+    ctx.beginPath(); ctx.arc(x, y, eyeR, 0, TAU);
+    ctx.fillStyle = '#fdfdff'; ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x + ca * eyeR * 0.42, y + sa * eyeR * 0.42, pupR, 0, TAU);
+    ctx.fillStyle = '#0a0d16'; ctx.fill();
+  }
+}
+
+function drawPops() {
+  for (let i = pops.length - 1; i >= 0; i--) {
+    const p = pops[i];
+    p.t += 0.06;
+    if (p.t >= 1) { pops.splice(i, 1); continue; }
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 4 + p.t * 22, 0, TAU);
+    ctx.strokeStyle = `hsla(${p.hue},95%,70%,${(1 - p.t) * 0.5})`;
+    ctx.lineWidth = 2.5 * (1 - p.t);
+    ctx.stroke();
+  }
+}
+
+function drawStick() {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(stick.ox, stick.oy, LEASH, 0, TAU);
+  ctx.strokeStyle = 'rgba(232,237,255,0.16)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  const dx = stick.x - stick.ox, dy = stick.y - stick.oy;
+  const d = Math.min(LEASH, Math.hypot(dx, dy)) || 0;
+  const a = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.arc(stick.ox + Math.cos(a) * d, stick.oy + Math.sin(a) * d, 20, 0, TAU);
+  ctx.fillStyle = 'rgba(74,222,128,0.28)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(74,222,128,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawMinimap() {
+  const size = Math.min(104, Math.min(W, H) * 0.26);
+  const pad = 16;
+  const cx = pad + safeInset.l + size / 2;
+  const cy = H - pad - safeInset.b - size / 2;
+  const R = size / 2;
+  const k = R / CFG.worldR;
+
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, TAU);
+  ctx.fillStyle = 'rgba(10,14,26,0.55)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(148,163,214,0.3)'; ctx.lineWidth = 1; ctx.stroke();
+
+  for (const s of world.snakes) {
+    if (!s.alive) continue;
+    ctx.beginPath();
+    ctx.arc(cx + s.x * k, cy + s.y * k, s.isPlayer ? 3 : 2, 0, TAU);
+    ctx.fillStyle = s.isPlayer ? '#4ade80' : `hsla(${s.hue},80%,65%,0.75)`;
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------------ *
+ * HUD
+ * ------------------------------------------------------------------ */
+const hud = document.getElementById('hud');
+const statLen = document.getElementById('statLen');
+const statRank = document.getElementById('statRank');
+const board = document.getElementById('board');
+let hudTimer = 0;
+
+function updateHud(dt) {
+  hudTimer -= dt;
+  if (hudTimer > 0) return;
+  hudTimer = 0.12;
+
+  const p = world.player;
+  statLen.textContent = Math.floor(p.len);
+
+  const ranked = world.snakes.filter(s => s.alive).sort((a, b) => b.len - a.len);
+  const idx = ranked.indexOf(p);
+  statRank.textContent = idx >= 0 ? `${idx + 1} / ${ranked.length}` : '–';
+
+  let html = '';
+  for (let i = 0; i < Math.min(5, ranked.length); i++) {
+    const s = ranked[i];
+    html += `<li class="${s.isPlayer ? 'me' : ''}"><span class="n">${i + 1}. ${s.name}</span><span class="s">${Math.floor(s.len)}</span></li>`;
+  }
+  if (idx >= 5) html += `<li class="me"><span class="n">${idx + 1}. You</span><span class="s">${Math.floor(p.len)}</span></li>`;
+  board.innerHTML = html;
+}
+
+/* ------------------------------------------------------------------ *
+ * Game flow
+ * ------------------------------------------------------------------ */
+const overlay = document.getElementById('overlay');
+const results = document.getElementById('results');
+const playBtn = document.getElementById('playBtn');
+const tagline = document.getElementById('tagline');
+
+function startGame() {
+  resize();
+  world.reset();
+  world.running = true;
+  stick.active = false;
+  boostFromTouch = boostFromKey = boostFromBtn = false;
+  boostBtn.classList.remove('on');
+  overlay.classList.add('hidden');
+  hud.classList.remove('hidden');
+  boostBtn.classList.remove('hidden');
+  last = performance.now();
+}
+
+function endGame() {
+  world.running = false;
+  const p = world.player;
+  const len = Math.floor(p.len);
+  const best = Math.max(len, +(localStorage.getItem('coil.best') || 0));
+  try { localStorage.setItem('coil.best', best); } catch (e) {}
+
+  document.getElementById('finalLen').textContent = len;
+  document.getElementById('bestLen').textContent = best;
+  document.getElementById('finalKills').textContent = p.kills;
+  results.classList.remove('hidden');
+  tagline.textContent = p.kills > 0
+    ? `You took down ${p.kills} ${p.kills === 1 ? 'rival' : 'rivals'} before someone cut you off.`
+    : 'You ran into someone else’s tail.';
+  playBtn.textContent = 'Play again';
+  setTimeout(() => {
+    overlay.classList.remove('hidden');
+    hud.classList.add('hidden');
+    boostBtn.classList.add('hidden');
+  }, 700);
+}
+
+playBtn.addEventListener('click', startGame);
+
+/* ------------------------------------------------------------------ *
+ * Main loop
+ * ------------------------------------------------------------------ */
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.034, (now - last) / 1000);
+  last = now;
+  if (world.player) {
+    step(dt);                      // keeps running behind the menu as an attract loop
+    if (world.running) updateHud(dt);
+    draw();
+  }
+}
+
+document.addEventListener('visibilitychange', () => { last = performance.now(); });
+
+/* ------------------------------------------------------------------ *
+ * Install prompt
+ * ------------------------------------------------------------------ */
+const installBtn = document.getElementById('installBtn');
+let deferredPrompt = null;
+addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredPrompt = e;
+  installBtn.classList.remove('hidden');
+});
+installBtn.addEventListener('click', async () => {
+  if (!deferredPrompt) return;
+  deferredPrompt.prompt();
+  await deferredPrompt.userChoice;
+  deferredPrompt = null;
+  installBtn.classList.add('hidden');
+});
+
+/* boot */
+resize();
+world.reset();
+world.running = false;
+document.getElementById('bestLen').textContent = localStorage.getItem('coil.best') || 0;
+requestAnimationFrame(frame);
